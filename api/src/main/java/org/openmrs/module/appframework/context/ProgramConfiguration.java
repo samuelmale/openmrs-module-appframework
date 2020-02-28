@@ -1,10 +1,16 @@
 package org.openmrs.module.appframework.context;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map.Entry;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -29,11 +35,7 @@ public class ProgramConfiguration {
     private String stateRef;
 	
 	private ResolvedConfiguration resolvedConfig;
-		
-	private List<ProgramWorkflow> allPossibleWorkflows;
-	
-	private List<ProgramWorkflowState> allPossibleStates;
-	
+			
     public ProgramConfiguration() {
     	
     }
@@ -113,7 +115,7 @@ public class ProgramConfiguration {
 				return programHasWorkflow && workflow.getStates().contains(state);
 			}
 			return programHasWorkflow;
-		}
+		}	
 		return false;
 	}
 	
@@ -121,137 +123,100 @@ public class ProgramConfiguration {
 		if (resolvedConfig != null) {
 			return resolvedConfig;
 		}
-		ResolvedConfiguration ret = new ResolvedConfiguration();	    
-		if (StringUtils.isNotBlank(programRef)) {
-		    List<Program> programs = getAllPossiblePrograms();
+		List<Program> programs = this.getAllPossiblePrograms();
+		List<ProgramWorkflow> workflows = this.getAllPossibleWorkflows();
+		List<ProgramWorkflowState> states = this.getAllPossibleStates();
+		
+		if (CollectionUtils.isNotEmpty(programs) && CollectionUtils.isNotEmpty(workflows)) {
+			shortListProgramsAndWorkflows(programs, workflows);
+		}
+		if (CollectionUtils.isNotEmpty(workflows) && CollectionUtils.isNotEmpty(states)) {
+			shortListWorkflowsAndStates(workflows, states);
+		}
+		if (CollectionUtils.isNotEmpty(programs) && CollectionUtils.isNotEmpty(states)) {
+			if (!(programs.size() == 1 && states.size() == 1)) {
+				shortListProgramsAndStates(programs, states);
+			}
+		}
+		// Collect short listed items
+		ResolvedConfiguration ret = new ResolvedConfiguration();
+		if (programs != null) {
 			if (programs.size() == 1) {
 				ret.setProgram(programs.get(0));
-			} else if (programs.size() > 1) {
-				ret.setProgram(programWithBestWorflowAndStateCombination(programs));
+			} else {
+				throw new APIException("Failed to figure out the intended program identified by: " + programRef);
 			}
-		}			    	    
-		if (StringUtils.isNotBlank(workflowRef)) {
-		    List<ProgramWorkflow> workflows = getAllPossibleWorkflows();
-		    if (workflows.size() == 1) {
+		}
+		if (workflows != null) {
+			if (workflows.size() == 1) {
 				ret.setWorkflow(workflows.get(0));
-			} else if (workflows.size() > 1) {
-				ret.setWorkflow(workflowWithBestProgramAndStateCombination(workflows, ret.getProgram()));
-			} 
-		}		
-		if (StringUtils.isNotBlank(stateRef)) {
-		    List<ProgramWorkflowState> states = getAllPossibleStates();
-		    if (states.size() == 1) {
-				ret.setState(states.get(0));
-			} else if (states.size() > 1) {
-				ret.setState(stateWithBestProgramAndWorkflowCombination(states, ret.getProgram(), ret.getWorkflow()));
+			} else {
+				throw new APIException("Failed to figure out the intended workflow identified by: " + workflowRef);
 			}
-		}	    
+		}
+		if (states != null) {
+			if (states.size() == 1) {
+				ret.setState(states.get(0));
+			} else {
+				throw new APIException("Failed to figure out the intended state identified by: " + stateRef);				
+			}
+		}
 	    return ret;
 	}
+	
+	public void shortListProgramsAndWorkflows(List<Program> programs, List<ProgramWorkflow> workflows) {
+		Predicate<Entry<ProgramWorkflow, Program>> predicate = entry -> {
+			return entry.getValue().getAllWorkflows().contains(entry.getKey());
+		};
+		filter(programs, workflows, predicate);
+	}
+	
+	public void shortListWorkflowsAndStates(List<ProgramWorkflow> workflows, List<ProgramWorkflowState> states) {
+		Predicate<Entry<ProgramWorkflowState, ProgramWorkflow>> predicate = entry -> {
+			return entry.getValue().getStates(false).contains(entry.getKey());
+		};
+		filter(workflows, states, predicate);
+	}
+	
+	public void shortListProgramsAndStates(List<Program> programs, List<ProgramWorkflowState> states) {
+		Predicate<Entry<ProgramWorkflowState, Program>> predicate = entry -> {
+			for (ProgramWorkflow workflow : entry.getValue().getAllWorkflows()) {
+				if (workflow.getStates(false).contains(entry.getKey())) {
+					return true;
+				}
+			}
+			return false;
+		};
+		filter(programs, states, predicate);
+	}
+	
+	private <Owner, Owned> void filter(List<Owner> owningTypes, List<Owned> ownedTypes, Predicate<Entry<Owned, Owner>> predicate) {	
+	    List<Entry<Owned, Owner>> ownedToOwnersMap = new ArrayList<>();
+	    List<Owner> ownersFiltrate = new ArrayList<>();
+	    List<Owned> ownedMembersFiltrate = new ArrayList<>();
+	  
+	    Function<Owner, List<Entry<Owned, Owner>>> ownersToOwnedMapper = owner -> {
+		    HashMap<Owned, Owner> map = new HashMap<>();
+		    for (Owned ownedType : ownedTypes) {
+			     map.put(ownedType, owner);
+		    }
+		    return new ArrayList<>(map.entrySet());
+	    };
+	  
+	    Consumer<Entry<Owned, Owner>> updateFiltrates = entry -> {
+		   ownedMembersFiltrate.add(((Entry<Owned, Owner>)entry).getKey());
+		   ownersFiltrate.add(((Entry<Owned, Owner>)entry).getValue());
 
-	protected Program programWithBestWorflowAndStateCombination(List<Program> programsSharingConcept) {
-		Set<Program> candidates = new HashSet<Program>();
-		for (Program program : programsSharingConcept) {
-			if (StringUtils.isNotBlank(workflowRef) && allPossibleWorkflows == null) {
-				allPossibleWorkflows = getAllPossibleWorkflows();
-			} 
-			if (CollectionUtils.isNotEmpty(allPossibleWorkflows)) {
-				for (ProgramWorkflow workflow : allPossibleWorkflows) {
-					if (program.getAllWorkflows().contains(workflow)) {
-						candidates.add(program);
-					}
-				}
-			}
-		}
-		if (candidates.size() == 1) {
-			return candidates.iterator().next();
-		}		
-		if (StringUtils.isNotBlank(stateRef) && candidates.size() > 1) {
-			programsSharingConcept.clear();
-			programsSharingConcept.addAll(candidates);
-			candidates.clear();
-			for (Program candidate : programsSharingConcept) {
-				if (StringUtils.isNotBlank(stateRef) && allPossibleStates == null) {
-					allPossibleStates = getAllPossibleStates();
-				}
-				for (ProgramWorkflowState state : allPossibleStates) {
-					for (ProgramWorkflow workflow : candidate.getAllWorkflows()) {
-						if (workflow.getSortedStates().contains(state)) {							
-							candidates.add(candidate);
-						}
-					}
-				}
-			}
-			if (candidates.size() == 1) {
-				return candidates.iterator().next();
-			}
-		}
-		// If we didn't get any qualifying candidate or got more than one
-		throw new APIException("Could not choose the intended program out of the many programs identified by concept: " + programRef);
+	    };
+	  
+	    owningTypes.stream().map(ownersToOwnedMapper).forEach(item -> ownedToOwnersMap.addAll(item));
+	    ownedToOwnersMap.stream().filter(predicate).forEach(updateFiltrates);
+	  
+	    // update the short lists
+	    owningTypes.retainAll(ownersFiltrate);
+	    ownedTypes.retainAll(ownedMembersFiltrate);
 	}
-	
-	@SuppressWarnings("unchecked")
-	protected ProgramWorkflow workflowWithBestProgramAndStateCombination(List<ProgramWorkflow> workflowsSharingConcept,
-			Program underlyingProgram) {
-		Collection<ProgramWorkflow> candidates = new HashSet<ProgramWorkflow>();
-		// Look at the states and try to find out the best combination(s)
-		if (StringUtils.isNotBlank(stateRef)) {
-			for (ProgramWorkflow candidate : workflowsSharingConcept) {
-				if (allPossibleStates == null) {
-					allPossibleStates = getAllPossibleStates();
-				}
-				for (ProgramWorkflowState state : allPossibleStates) {
-					if (candidate.getSortedStates().contains(state)) {
-						candidates.add(candidate);
-					}
-				}
-			}
-		}
-		if (candidates.size() == 1) {
-			return candidates.iterator().next();
-		} else if (candidates.size() > 1) {
-			// Move up to the underlying program and see whether we can have an outstanding combination
-			if (underlyingProgram != null) {
-				candidates =  CollectionUtils.intersection(candidates, underlyingProgram.getAllWorkflows());
-				if (candidates.size() == 1) {
-					return candidates.iterator().next();
-				}
-			}
-		}
-		// If we didn't get any qualifying candidate or got more than one
-		throw new APIException("Could not choose the intended workflow out of the many workflows identified by concept: " + workflowRef);
-	}
-	
-	@SuppressWarnings("unchecked")
-	protected ProgramWorkflowState stateWithBestProgramAndWorkflowCombination(List<ProgramWorkflowState> statesSharingConcept, 
-			Program underlyingProgram, ProgramWorkflow underlyingWorkflow) {
-		Collection<ProgramWorkflowState> candidates = new HashSet<ProgramWorkflowState>();
-		// Try combining with the underlying workflow
-		if (underlyingWorkflow != null) {
-			candidates = CollectionUtils.intersection(statesSharingConcept, underlyingWorkflow.getSortedStates());
-			if (candidates.size() == 1) {
-				return candidates.iterator().next();
-			}
-		}
-		// Try combining with the underlying program
-		if (underlyingProgram != null) {
-			Set<ProgramWorkflowState> allProgramStates = new HashSet<ProgramWorkflowState>();
-			for (ProgramWorkflow workflow : underlyingProgram.getAllWorkflows()) {
-				allProgramStates.addAll(workflow.getSortedStates());
-			}
-			if (CollectionUtils.isNotEmpty(candidates)) {
-				candidates = CollectionUtils.intersection(candidates, allProgramStates);
-			} else {
-				candidates = CollectionUtils.intersection(statesSharingConcept, allProgramStates);
-			}
-			if (candidates.size() == 1) {
-				return candidates.iterator().next();
-			}
-		}
-		// If we didn't get any qualifying candidate or got more than one
-		throw new APIException("Could not choose the intended state out of the many states identified by concept: " + stateRef);
-	}
-	
+		
 	/**
 	 * Gets program(s) identified by the {@link #programRef}
 	 * 
@@ -260,6 +225,9 @@ public class ProgramConfiguration {
 	 * @should get program(s) by the associated {@code concept}
 	 */
 	private List<Program> getAllPossiblePrograms() {
+		if (programRef == null) {
+			return null;
+		}
 		try {
 			Integer programId = Integer.parseInt(programRef);
 			Program program = Context.getProgramWorkflowService().getProgram(programId);
@@ -293,6 +261,9 @@ public class ProgramConfiguration {
 	 * @should get workflow(s) by the associated {@code concept}
 	 */
 	private List<ProgramWorkflow> getAllPossibleWorkflows() {
+		if (workflowRef == null) {
+			return null;
+		}
 		try {
 			Integer workflowId = Integer.parseInt(workflowRef);
 			ProgramWorkflow workflow = Context.getProgramWorkflowService().getWorkflow(workflowId);
@@ -325,6 +296,9 @@ public class ProgramConfiguration {
 	 * @should get state(s) by the associated {@code concept}
 	 */
 	private List<ProgramWorkflowState> getAllPossibleStates() {
+		if (stateRef == null) {
+			return null;
+		}
 		try {
 			Integer stateId = Integer.parseInt(stateRef);
 			ProgramWorkflowState state = Context.getProgramWorkflowService().getState(stateId);
@@ -352,23 +326,7 @@ public class ProgramConfiguration {
 	public void setResolvedConfig(ResolvedConfiguration resolvedConfig) {
 		this.resolvedConfig = resolvedConfig;
 	}
-	
-	public boolean hasProgram() {
-		return getResolvedConfig().getProgram() != null;
-	}
-	
-	public boolean hasWorkflow() {
-		return getResolvedConfig().getWorkflow() != null;
-	}
-
-	public boolean hasState() {
-		return getResolvedConfig().getState() != null;
-	}
-	
-	public boolean hasAll() {
-		return hasProgram() && hasWorkflow() && hasState();
-	}
-	
+		
 	public static class ResolvedConfiguration {
 		
 		private Program program;
